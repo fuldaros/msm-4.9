@@ -57,6 +57,9 @@
 #define MSM_VERSION_MINOR	2
 #define MSM_VERSION_PATCHLEVEL	0
 
+atomic_t resume_pending;
+wait_queue_head_t resume_wait_q;
+
 static void msm_fb_output_poll_changed(struct drm_device *dev)
 {
 	struct msm_drm_private *priv = NULL;
@@ -525,14 +528,6 @@ static int msm_drm_init(struct device *dev, struct drm_driver *drv)
 	ret = msm_init_vram(ddev);
 	if (ret)
 		goto fail;
-
-	if (!dev->dma_parms) {
-		dev->dma_parms = devm_kzalloc(dev, sizeof(*dev->dma_parms),
-					      GFP_KERNEL);
-		if (!dev->dma_parms)
-			return -ENOMEM;
-	}
-	dma_set_max_seg_size(dev, DMA_BIT_MASK(32));
 
 	switch (get_mdp_ver(pdev)) {
 	case KMS_MDP4:
@@ -1592,6 +1587,19 @@ static struct drm_driver msm_driver = {
 };
 
 #ifdef CONFIG_PM_SLEEP
+static int msm_pm_prepare(struct device *dev)
+{
+	atomic_inc(&resume_pending);
+	return 0;
+}
+
+static void msm_pm_complete(struct device *dev)
+{
+	atomic_set(&resume_pending, 0);
+	wake_up_all(&resume_wait_q);
+	return;
+}
+
 static int msm_pm_suspend(struct device *dev)
 {
 	struct drm_device *ddev;
@@ -1644,6 +1652,8 @@ static int msm_pm_resume(struct device *dev)
 #endif
 
 static const struct dev_pm_ops msm_pm_ops = {
+	.prepare = msm_pm_prepare,
+	.complete = msm_pm_complete,
 	SET_SYSTEM_SLEEP_PM_OPS(msm_pm_suspend, msm_pm_resume)
 };
 
