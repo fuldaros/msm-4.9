@@ -1,4 +1,5 @@
 /* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2020 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -34,6 +35,7 @@
 #include <linux/qpnp/qpnp-pbs.h>
 #include <linux/qpnp/qpnp-misc.h>
 #include <linux/power_supply.h>
+#include <asm/bootinfo.h>
 
 #define PMIC_VER_8941           0x01
 #define PMIC_VERSION_REG        0x0105
@@ -777,6 +779,75 @@ int qpnp_pon_is_warm_reset(void)
 		return pon->warm_reset_reason1;
 }
 EXPORT_SYMBOL(qpnp_pon_is_warm_reset);
+
+int qpnp_pon_system_pwr_off(enum pon_power_off_type type)
+{
+	int rc = 0;
+	struct qpnp_pon *pon = sys_reset_dev;
+	struct qpnp_pon *tmp;
+	struct power_supply *batt_psy;
+	union power_supply_propval val;
+	unsigned long flags;
+
+	if (!pon)
+		return -ENODEV;
+
+	rc = qpnp_pon_reset_config(pon, type);
+	if (rc) {
+		dev_err(&pon->pdev->dev,
+			"Error configuring main PON rc: %d\n",
+			rc);
+		return rc;
+	}
+
+	/*
+	 * Check if a secondary PON device needs to be configured. If it
+	 * is available, configure that also as per the requested power off
+	 * type
+	 */
+	spin_lock_irqsave(&spon_list_slock, flags);
+	if (list_empty(&spon_dev_list))
+		goto out;
+
+	list_for_each_entry_safe(pon, tmp, &spon_dev_list, list) {
+		dev_emerg(&pon->pdev->dev,
+				"PMIC@SID%d: configuring PON for reset\n",
+				to_spmi_device(pon->pdev->dev.parent)->usid);
+		rc = qpnp_pon_reset_config(pon, type);
+		if (rc) {
+			dev_err(&pon->pdev->dev,
+				"Error configuring secondary PON rc: %d\n",
+				rc);
+			goto out;
+		}
+		if (pon->resin_pon_reset) {
+			rc = qpnp_resin_pon_reset_config(pon, type);
+			if (rc) {
+				dev_err(&pon->pdev->dev,
+					"Error configuring secondary PON resin rc: %d\n",
+					rc);
+				goto out;
+			}
+		}
+	}
+	/* Set ship mode here if it has been requested */
+	if (!!pon_ship_mode_en) {
+		batt_psy = power_supply_get_by_name("battery");
+		if (batt_psy) {
+			pr_debug("Set ship mode!\n");
+			val.intval = 1;
+			rc = power_supply_set_property(batt_psy,
+					POWER_SUPPLY_PROP_SET_SHIP_MODE, &val);
+			if (rc)
+				dev_err(&pon->pdev->dev,
+						"Set ship-mode failed\n");
+		}
+	}
+out:
+	spin_unlock_irqrestore(&spon_list_slock, flags);
+	return rc;
+}
+EXPORT_SYMBOL(qpnp_pon_system_pwr_off);
 
 /**
  * qpnp_pon_wd_config - Disable the wd in a warm reset.
@@ -2333,6 +2404,7 @@ static int qpnp_pon_probe(struct platform_device *pdev)
 				"PMIC@SID%d: Power-off reason: %s\n",
 				to_spmi_device(pon->pdev->dev.parent)->usid,
 				qpnp_poff_reason[index]);
+		set_poweroff_reason(index);
 	}
 
 	if (pon->pon_trigger_reason == PON_SMPL ||
