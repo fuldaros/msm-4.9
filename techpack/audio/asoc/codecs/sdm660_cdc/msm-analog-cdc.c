@@ -194,6 +194,7 @@ static int msm_anlg_cdc_enable_ext_mb_source(struct wcd_mbhc *wcd_mbhc,
 					     bool turn_on);
 static void msm_anlg_cdc_trim_btn_reg(struct snd_soc_codec *codec);
 static void msm_anlg_cdc_set_micb_v(struct snd_soc_codec *codec);
+static void msm_anlg_cdc_set_micb2_v(struct snd_soc_codec *codec, u32 mv);
 static void msm_anlg_cdc_set_boost_v(struct snd_soc_codec *codec);
 static void msm_anlg_cdc_set_auto_zeroing(struct snd_soc_codec *codec,
 					  bool enable);
@@ -914,6 +915,7 @@ static const struct wcd_mbhc_cb mbhc_cb = {
 	.trim_btn_reg = msm_anlg_cdc_trim_btn_reg,
 	.compute_impedance = msm_anlg_cdc_mbhc_calc_impedance,
 	.set_micbias_value = msm_anlg_cdc_set_micb_v,
+	.set_micbias2_value = msm_anlg_cdc_set_micb2_v,
 	.set_auto_zeroing = msm_anlg_cdc_set_auto_zeroing,
 	.get_hwdep_fw_cal = msm_anlg_cdc_get_hwdep_fw_cal,
 	.set_cap_mode = msm_anlg_cdc_configure_cap,
@@ -3915,10 +3917,42 @@ static void msm_anlg_cdc_set_micb_v(struct snd_soc_codec *codec)
 	struct sdm660_cdc_pdata *pdata = sdm660_cdc->dev->platform_data;
 	u8 reg_val;
 
-	reg_val = VOLTAGE_CONVERTER(pdata->micbias.cfilt1_mv, MICBIAS_MIN_VAL,
-			MICBIAS_STEP_SIZE);
-	dev_dbg(codec->dev, "cfilt1_mv %d reg_val %x\n",
-			(u32)pdata->micbias.cfilt1_mv, reg_val);
+	if (pdata->micbias.cfilt2_mv > 0) {
+		reg_val = VOLTAGE_CONVERTER(pdata->micbias.cfilt2_mv, MICBIAS_MIN_VAL,
+				MICBIAS_STEP_SIZE);
+		dev_dbg(codec->dev, "cfilt2_mv %d reg_val %x\n",
+				(u32)pdata->micbias.cfilt2_mv, reg_val);
+	} else {
+		reg_val = VOLTAGE_CONVERTER(pdata->micbias.cfilt1_mv, MICBIAS_MIN_VAL,
+				MICBIAS_STEP_SIZE);
+		dev_dbg(codec->dev, "cfilt1_mv %d reg_val %x\n",
+				(u32)pdata->micbias.cfilt1_mv, reg_val);
+	}
+
+	snd_soc_update_bits(codec, MSM89XX_PMIC_ANALOG_MICB_1_VAL,
+			0xF8, (reg_val << 3));
+}
+
+static void msm_anlg_cdc_set_micb2_v(struct snd_soc_codec *codec, u32 mv)
+{
+	struct sdm660_cdc_priv *sdm660_cdc = snd_soc_codec_get_drvdata(codec);
+	struct sdm660_cdc_pdata *pdata = sdm660_cdc->dev->platform_data;
+	u8 reg_val;
+
+	pdata->micbias.cfilt2_mv = mv;
+
+	if (pdata->micbias.cfilt2_mv > 0) {
+		reg_val = VOLTAGE_CONVERTER(pdata->micbias.cfilt2_mv, MICBIAS_MIN_VAL,
+				MICBIAS_STEP_SIZE);
+		dev_dbg(codec->dev, "cfilt2_mv %d reg_val %x\n",
+				(u32)pdata->micbias.cfilt2_mv, reg_val);
+	} else {
+		reg_val = VOLTAGE_CONVERTER(pdata->micbias.cfilt1_mv, MICBIAS_MIN_VAL,
+				MICBIAS_STEP_SIZE);
+		dev_dbg(codec->dev, "cfilt1_mv %d reg_val %x\n",
+				(u32)pdata->micbias.cfilt1_mv, reg_val);
+	}
+
 	snd_soc_update_bits(codec, MSM89XX_PMIC_ANALOG_MICB_1_VAL,
 			0xF8, (reg_val << 3));
 }
@@ -3985,12 +4019,6 @@ static ssize_t msm_anlg_codec_version_read(struct snd_info_entry *entry,
 
 	switch (get_codec_version(sdm660_cdc_priv)) {
 	case DRAX_CDC:
-	case DIANGU:
-	case CAJON_2_0:
-	case CAJON:
-	case CONGA:
-	case TOMBAK_2_0:
-	case TOMBAK_1_0:
 		len = snprintf(buffer, sizeof(buffer), "DRAX-CDC_1_0\n");
 		break;
 	default:
@@ -4028,8 +4056,8 @@ int msm_anlg_codec_info_create_codec_entry(struct snd_info_entry *codec_root,
 	sdm660_cdc_priv = snd_soc_codec_get_drvdata(codec);
 	card = codec->component.card;
 	sdm660_cdc_priv->entry = snd_info_create_subdir(codec_root->module,
-							    sdm660_cdc_priv->pmic_analog,
-							    codec_root);
+							     "spmi0-03",
+							     codec_root);
 	if (!sdm660_cdc_priv->entry) {
 		dev_dbg(codec->dev, "%s: failed to create pmic_analog entry\n",
 			__func__);
@@ -4577,7 +4605,7 @@ static int msm_anlg_cdc_probe(struct platform_device *pdev)
 	struct sdm660_cdc_priv *sdm660_cdc = NULL;
 	struct sdm660_cdc_pdata *pdata;
 	int adsp_state;
-	const char *parent_dev = NULL;
+
 	adsp_state = apr_get_subsys_state();
 	if (adsp_state == APR_SUBSYS_DOWN ||
 		!q6core_is_adsp_ready()) {
@@ -4659,12 +4687,7 @@ static int msm_anlg_cdc_probe(struct platform_device *pdev)
 	INIT_WORK(&sdm660_cdc->msm_anlg_add_child_devices_work,
 		  msm_anlg_add_child_devices);
 	schedule_work(&sdm660_cdc->msm_anlg_add_child_devices_work);
-	parent_dev = pdev->dev.parent->of_node->full_name;
-	if (parent_dev) {
-		snprintf(sdm660_cdc->pmic_analog, PMIC_ANOLOG_SIZE, "spmi0-0%s",
-			 parent_dev + strlen(parent_dev)-1);
-		parent_dev = NULL;
-	}
+
 	return ret;
 err_supplies:
 	msm_anlg_cdc_disable_supplies(sdm660_cdc, pdata);
